@@ -32,10 +32,12 @@ __device__ static void multiply_and_scatter(
     for (unsigned int pa = A_rowPtrs[i]; pa < A_rowPtrs[i + 1]; ++pa) {
         unsigned int k = A_colIdxs[pa];
         float vA = A_vals[pa];
+
         // For each nonzero in row of B
         for (unsigned int pb = B_rowPtrs[k]; pb < B_rowPtrs[k + 1]; ++pb) {
             unsigned int j = B_colIdxs[pb];
             float prod = vA * B_vals[pb];
+
             if (marker[j] == -1) {
                 // Reserve in C via atomic add
                 unsigned int index = atomicAdd(d_outputcount, 1u);
@@ -52,35 +54,38 @@ __device__ static void multiply_and_scatter(
 }
 
 __global__ static void spmspm_gpu0_kernel(
-    unsigned int rowsA,            
-    const unsigned int *A_rowPtrs, 
-    const unsigned int *A_colIdxs, 
-    const float *A_vals,           
-    const unsigned int *B_rowPtrs, 
-    const unsigned int *B_colIdxs, 
-    const float *B_vals,           
-    unsigned int colsB,            
-    unsigned int *C_rowIdxs,       
-    unsigned int *C_colIdxs,       
-    float *C_vals,                 
-    int *marker,                   
-    unsigned int *d_outputcount          
-)
-{
+    unsigned int rowsA,
+    const unsigned int *A_rowPtrs,
+    const unsigned int *A_colIdxs,
+    const float        *A_vals,
+    const unsigned int *B_rowPtrs,
+    const unsigned int *B_colIdxs,
+    const float        *B_vals,
+    unsigned int colsB,
+    unsigned int *C_rowIdxs,
+    unsigned int *C_colIdxs,
+    float        *C_vals,
+    int          *marker,
+    unsigned int *d_outputcount
+) {
     unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= rowsA) return;
 
-    // Each thread has a slice of marker array of length numColsB
-    int *marker = marker + i * colsB;
+    // Each thread has a slice of marker array of length colsB
+    int *marker_row = marker + i * colsB;
+
     // Reset markers for this row
-    clear_marker_row(marker, colsB);
+    clear_marker_row(marker_row, colsB);
+
+    // Scatter into C for this row
     multiply_and_scatter(
         i,
         A_rowPtrs, A_colIdxs, A_vals,
         B_rowPtrs, B_colIdxs, B_vals,
         colsB,
         C_rowIdxs, C_colIdxs, C_vals,
-        marker, d_outputcount
+        marker_row,
+        d_outputcount
     );
 }
 
@@ -97,8 +102,7 @@ void spmspm_gpu0(
     unsigned int numCols2,
     unsigned int numNonzeros1,
     unsigned int numNonzeros2
-)
-{
+) {
     // Unpack device pointers for CSR(A)
     CSRMatrix hA;
     CUDA_ERROR_CHECK(cudaMemcpy(&hA, csrMatrix1, sizeof(hA), cudaMemcpyDeviceToHost));
@@ -121,11 +125,11 @@ void spmspm_gpu0(
     float        *d_C_vals    = hC.values;
 
     // Allocate marker array and output counter on device
-    int *d_marker;
-    unsigned int *d_outputcountt;
-    CUDA_ERROR_CHECK(cudaMalloc(&d_marker, numRows1 * numCols2 * sizeof(int)));    
-    CUDA_ERROR_CHECK(cudaMalloc(&d_outputcountt,    sizeof(unsigned int)));
-    CUDA_ERROR_CHECK(cudaMemset(d_outputcountt, 0, sizeof(unsigned int)));
+    int           *d_marker;
+    unsigned int  *d_outputcount;
+    CUDA_ERROR_CHECK(cudaMalloc(&d_marker,        numRows1 * numCols2 * sizeof(int)));
+    CUDA_ERROR_CHECK(cudaMalloc(&d_outputcount,  sizeof(unsigned int)));
+    CUDA_ERROR_CHECK(cudaMemset(d_outputcount, 0, sizeof(unsigned int)));
 
     // one thread per row of A
     const int threads = 512;
@@ -137,14 +141,14 @@ void spmspm_gpu0(
         numCols2,
         d_C_rowIdxs, d_C_colIdxs, d_C_vals,
         d_marker,
-        d_outputcountt
+        d_outputcount
     );
     CUDA_ERROR_CHECK(cudaGetLastError());
     CUDA_ERROR_CHECK(cudaDeviceSynchronize());
 
     // Retrieve final count of COO entries and update struct
     unsigned int newCount;
-    CUDA_ERROR_CHECK(cudaMemcpy(&newCount, d_outputcountt, sizeof(newCount), cudaMemcpyDeviceToHost));
+    CUDA_ERROR_CHECK(cudaMemcpy(&newCount, d_outputcount, sizeof(newCount), cudaMemcpyDeviceToHost));
     CUDA_ERROR_CHECK(cudaMemcpy(
         (char*)cooMatrix3 + offsetof(COOMatrix, numNonzeros),
         &newCount,
@@ -152,7 +156,7 @@ void spmspm_gpu0(
         cudaMemcpyHostToDevice
     ));
 
-    //Free 
+    // Free
     CUDA_ERROR_CHECK(cudaFree(d_marker));
-    CUDA_ERROR_CHECK(cudaFree(d_outputcountt));
+    CUDA_ERROR_CHECK(cudaFree(d_outputcount));
 }

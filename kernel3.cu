@@ -85,7 +85,7 @@ __global__ void spmspm_gpu_privatized(
     }
 }
 
-void spmspm_gpu2(
+void spmspm_gpu3(
     COOMatrix* cooMatrix1,
     CSRMatrix* csrMatrix1,
     CSCMatrix* cscMatrix1,
